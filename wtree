@@ -1,0 +1,156 @@
+#!/bin/bash
+
+# wtree - Create a git worktree and set up a tmux window for development
+# Usage: wtree <worktree-name> [branch-name]
+
+set -e
+
+# Color codes for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Function to print colored messages
+error() {
+    echo -e "${RED}Error: $1${NC}" >&2
+}
+
+success() {
+    echo -e "${GREEN}$1${NC}"
+}
+
+info() {
+    echo -e "${YELLOW}$1${NC}"
+}
+
+# Check for help flag
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "Usage: wtree <worktree-name> [branch-name]"
+    echo ""
+    echo "Create a git worktree and set up a tmux window for development"
+    echo ""
+    echo "Arguments:"
+    echo "  worktree-name    Name for the new worktree and tmux window"
+    echo "  branch-name      Optional branch name (creates new branch if doesn't exist)"
+    echo ""
+    echo "Environment variables:"
+    echo "  TMUX_DEFAULT_SESSION    Default tmux session when not inside tmux (default: Heard)"
+    exit 0
+fi
+
+# Check if we have at least one argument
+if [ $# -lt 1 ]; then
+    error "Usage: wtree <worktree-name> [branch-name]"
+    exit 1
+fi
+
+WORKTREE_NAME="$1"
+BRANCH_NAME="${2:-}"
+ORIGINAL_DIR="$(pwd)"
+
+# Check if we're in a git repository
+if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+    error "Not in a git repository"
+    exit 1
+fi
+
+# Get the root of the current git repository
+GIT_ROOT="$(git rev-parse --show-toplevel)"
+PARENT_DIR="$(dirname "$GIT_ROOT")"
+WORKTREE_PATH="$PARENT_DIR/$WORKTREE_NAME"
+
+# Check if worktree already exists
+if [ -d "$WORKTREE_PATH" ]; then
+    error "Worktree '$WORKTREE_NAME' already exists at $WORKTREE_PATH"
+    exit 1
+fi
+
+# Create the worktree
+info "Creating worktree at $WORKTREE_PATH..."
+if [ -n "$BRANCH_NAME" ]; then
+    # Check if branch exists locally or remotely
+    if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME" || \
+       git show-ref --verify --quiet "refs/remotes/origin/$BRANCH_NAME"; then
+        git worktree add "$WORKTREE_PATH" "$BRANCH_NAME"
+    else
+        # Create a new branch
+        info "Branch '$BRANCH_NAME' doesn't exist, creating it..."
+        git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH"
+    fi
+else
+    # Use current branch
+    CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+    info "Creating worktree from current branch: $CURRENT_BRANCH"
+    git worktree add "$WORKTREE_PATH"
+fi
+
+success "Worktree created successfully!"
+
+# Copy .env file if it exists in the original repository
+if [ -f "$GIT_ROOT/.env" ]; then
+    info "Copying .env file to new worktree..."
+    cp "$GIT_ROOT/.env" "$WORKTREE_PATH/.env"
+    success ".env file copied!"
+fi
+
+# Copy .env.local file if it exists in the original repository
+if [ -f "$GIT_ROOT/.env.local" ]; then
+    info "Copying .env.local file to new worktree..."
+    cp "$GIT_ROOT/.env.local" "$WORKTREE_PATH/.env.local"
+    success ".env.local file copied!"
+fi
+
+# Determine the tmux session to use
+if [ -n "$TMUX" ]; then
+    # We're inside tmux, get current session
+    TMUX_SESSION="$(tmux display-message -p '#S')"
+    info "Using current tmux session: $TMUX_SESSION"
+else
+    # Not in tmux, use default session
+    TMUX_SESSION="${TMUX_DEFAULT_SESSION:-Heard}"
+    info "Using default tmux session: $TMUX_SESSION"
+    
+    # Check if session exists
+    if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+        error "Tmux session '$TMUX_SESSION' doesn't exist"
+        error "Please create it first or run this command from within tmux"
+        exit 1
+    fi
+fi
+
+# Create the tmux window with the worktree name
+info "Setting up tmux window '$WORKTREE_NAME'..."
+tmux new-window -t "$TMUX_SESSION:" -n "$WORKTREE_NAME"
+
+# Set up the panes
+tmux split-window -h -t "$TMUX_SESSION:$WORKTREE_NAME"
+tmux split-window -v -t "$TMUX_SESSION:$WORKTREE_NAME"
+
+# Configure pane 1 (editor)
+tmux send-keys -t "$TMUX_SESSION:$WORKTREE_NAME.1" "cd $WORKTREE_PATH" C-m
+tmux send-keys -t "$TMUX_SESSION:$WORKTREE_NAME.1" 'vim' C-m
+tmux send-keys -t "$TMUX_SESSION:$WORKTREE_NAME.1" ':NvimTreeToggle' C-m
+
+# Configure pane 2 (dev server)
+tmux send-keys -t "$TMUX_SESSION:$WORKTREE_NAME.2" "cd $WORKTREE_PATH" C-m
+
+# Check if package.json exists and run npm install if needed
+if [ -f "$WORKTREE_PATH/package.json" ]; then
+    info "Found package.json, installing dependencies..."
+    tmux send-keys -t "$TMUX_SESSION:$WORKTREE_NAME.2" 'npm install' C-m
+    # Queue up npm run dev to run after install
+    tmux send-keys -t "$TMUX_SESSION:$WORKTREE_NAME.2" 'npm run dev' C-m
+fi
+
+# Configure pane 3 (terminal)
+tmux send-keys -t "$TMUX_SESSION:$WORKTREE_NAME.3" "cd $WORKTREE_PATH" C-m
+
+# Switch to the new window if we're in tmux
+if [ -n "$TMUX" ]; then
+    tmux select-window -t "$TMUX_SESSION:$WORKTREE_NAME"
+    tmux select-pane -t "$TMUX_SESSION:$WORKTREE_NAME.1"
+fi
+
+success "Tmux window '$WORKTREE_NAME' created and configured!"
+info "Worktree location: $WORKTREE_PATH"
